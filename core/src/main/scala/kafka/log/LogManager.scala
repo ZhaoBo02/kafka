@@ -64,7 +64,7 @@ class LogManager(val logDirs: Array[File],
 
   private val logCreationOrDeletionLock = new Object
   private val logs = new Pool[TopicPartition, Log]()
-  private val logsToBeDeleted = new LinkedBlockingQueue[Log]()
+  private val logsToBeDeleted = new LinkedBlockingQueue[(Log,Boolean)]()
 
   createAndValidateLogDirs(logDirs)
   private val dirLocks = lockLogDirs(logDirs)
@@ -179,7 +179,7 @@ class LogManager(val logDirs: Array[File],
             time = time,
             brokerTopicStats = brokerTopicStats)
           if (logDir.getName.endsWith(Log.DeleteDirSuffix)) {
-            this.logsToBeDeleted.add(current)
+            this.logsToBeDeleted.add(current,false)
           } else {
             val previous = this.logs.put(topicPartition, current)
             if (previous != null) {
@@ -440,16 +440,19 @@ class LogManager(val logDirs: Array[File],
     try {
       var failed = 0
       while (!logsToBeDeleted.isEmpty && failed < logsToBeDeleted.size()) {
-        val removedLog = logsToBeDeleted.take()
+        val (removedLog,tag) = logsToBeDeleted.take()
         if (removedLog != null) {
           try {
+            if(tag) {
+              removedLog.close()
+            }
             removedLog.delete()
             info(s"Deleted log for partition ${removedLog.topicPartition} in ${removedLog.dir.getAbsolutePath}.")
           } catch {
             case e: Throwable =>
               error(s"Exception in deleting $removedLog. Moving it to the end of the queue.", e)
               failed = failed + 1
-              logsToBeDeleted.put(removedLog)
+              logsToBeDeleted.put(removedLog,tag)
           }
         }
       }
@@ -476,7 +479,7 @@ class LogManager(val logDirs: Array[File],
         cleaner.updateCheckpoints(removedLog.dir.getParentFile)
       }
       val dirName = Log.logDeleteDirName(removedLog.name)
-      removedLog.close()
+     // removedLog.close()
       val renamedDir = new File(removedLog.dir.getParent, dirName)
       val renameSuccessful = removedLog.dir.renameTo(renamedDir)
       if (renameSuccessful) {
@@ -485,7 +488,7 @@ class LogManager(val logDirs: Array[File],
         // change the file pointers for log and index file
         removedLog.logSegments.foreach(_.updateDir(renamedDir))
 
-        logsToBeDeleted.add(removedLog)
+        logsToBeDeleted.add(removedLog,true)
         removedLog.removeLogMetrics()
         info(s"Log for partition ${removedLog.topicPartition} is renamed to ${removedLog.dir.getAbsolutePath} and is scheduled for deletion")
       } else {
